@@ -166,27 +166,23 @@ namespace ts.moduleSpecifiers {
         return result;
     }
 
-    function getAllModulePathsUsingIndirectSymlinks(files: ReadonlyArray<SourceFile>, target: string, getCanonicalFileName: (file: string) => string, host: ModuleSpecifierResolutionHost) {
+    function getAllModulePathsUsingIndirectSymlinks(files: ReadonlyArray<SourceFile>, targets: ReadonlyArray<string>, getCanonicalFileName: (file: string) => string, host: ModuleSpecifierResolutionHost) {
         const links = discoverProbableSymlinks(files, getCanonicalFileName, host);
         const paths = arrayFrom(links.keys());
-        let options: string[] | undefined;
+        const options = targets.slice();
         const compareStrings = (!host.useCaseSensitiveFileNames || host.useCaseSensitiveFileNames()) ? compareStringsCaseSensitive : compareStringsCaseInsensitive;
         for (const path of paths) {
             const resolved = links.get(path)!;
-            if (compareStrings(target.slice(0, resolved.length + 1), resolved + "/") === Comparison.EqualTo) {
+            const target = targets.find(t => compareStrings(t.slice(0, resolved.length + 1), resolved + "/") === Comparison.EqualTo);
+            if (target !== undefined) {
                 const relative = getRelativePathFromDirectory(resolved, target, getCanonicalFileName);
                 const option = resolvePath(path, relative);
                 if (!host.fileExists || host.fileExists(option)) {
-                    if (!options) options = [];
                     options.push(option);
                 }
             }
         }
-        if (options) {
-            options.push(target); // Since these are speculative, we also include the original resolved name as a possibility
-            return options;
-        }
-        return [target];
+        return options;
     }
 
     /**
@@ -196,12 +192,16 @@ namespace ts.moduleSpecifiers {
     function getAllModulePaths(files: ReadonlyArray<SourceFile>, importedFileName: string, getCanonicalFileName: (file: string) => string, host: ModuleSpecifierResolutionHost, redirectTargetsMap: RedirectTargetsMap): ReadonlyArray<string> {
         const redirects = redirectTargetsMap.get(importedFileName);
         const importedFileNames = redirects ? [...redirects, importedFileName] : [importedFileName];
+        const normalizedImportedFileNames = importedFileNames.map(f => getNormalizedAbsolutePath(f, cwd));
         const symlinks = mapDefined(files, sf =>
             sf.resolvedModules && firstDefinedIterator(sf.resolvedModules.values(), res =>
-                res && contains(importedFileNames, res.resolvedFileName) ? res.originalPath : undefined));
-        return symlinks.length === 0
-            ? flatMap(importedFileNames, importedFileName => getAllModulePathsUsingIndirectSymlinks(files, getNormalizedAbsolutePath(importedFileName, host.getCurrentDirectory ? host.getCurrentDirectory() : ""), getCanonicalFileName, host))
-            : symlinks;
+                res && res.resolvedFileName === importedFileName ? res.originalPath : undefined));
+        const cwd = host.getCurrentDirectory ? host.getCurrentDirectory() : "";
+        const baseOptions = getAllModulePathsUsingIndirectSymlinks(files, normalizedImportedFileNames, getCanonicalFileName, host);
+        if (symlinks.length === 0) {
+            return baseOptions;
+        }
+        return deduplicate(concatenate(baseOptions, flatMap(symlinks, f => getAllModulePathsUsingIndirectSymlinks(files, [f], getCanonicalFileName, host))));
     }
 
     function getRelativePathNParents(relativePath: string): number {
@@ -225,10 +225,7 @@ namespace ts.moduleSpecifiers {
             for (const patternText of paths[key]) {
                 const pattern = removeFileExtension(normalizePath(patternText));
                 const indexOfStar = pattern.indexOf("*");
-                if (indexOfStar === 0 && pattern.length === 1) {
-                    continue;
-                }
-                else if (indexOfStar !== -1) {
+                if (indexOfStar !== -1) {
                     const prefix = pattern.substr(0, indexOfStar);
                     const suffix = pattern.substr(indexOfStar + 1);
                     if (relativeToBaseUrl.length >= prefix.length + suffix.length &&
